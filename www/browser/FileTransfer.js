@@ -41,6 +41,16 @@ function getUrlCredentials(urlString) {
     return credentials && credentials[1];
 }
 
+function base64ToArrayBuffer(base64) {
+    var binaryString =  window.atob(base64);
+    var len = binaryString.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+}
+
 function getBasicAuthHeader(urlString) {
     var header =  null;
 
@@ -136,70 +146,88 @@ FileTransfer.prototype.upload = function(filePath, server, successCallback, erro
         }
     };
 
+    var uploadContent = function (content) {
+        var blob = new Blob([content], {type: mimeType});
+
+        // Prepare form data to send to server
+        var fd = new FormData();
+        fd.append(fileKey, blob, fileName);
+        for (var prop in params) {
+            if (params.hasOwnProperty(prop)) {
+                fd.append(prop, params[prop]);
+            }
+        }
+
+        xhr.open(httpMethod, server);
+
+        // Fill XHR headers
+        for (var header in headers) {
+            if (headers.hasOwnProperty(header)) {
+                xhr.setRequestHeader(header, headers[header]);
+            }
+        }
+
+        xhr.onload = function() {
+            if (this.status === 200) {
+                var result = new FileUploadResult(); // jshint ignore:line
+                result.bytesSent = blob.size;
+                result.responseCode = this.status;
+                result.response = this.response;
+                delete transfers[that._id];
+                successCallback(result);
+            } else if (this.status === 404) {
+                fail(FileTransferError.INVALID_URL_ERR, this.status, this.response);
+            } else {
+                fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+            }
+        };
+
+        xhr.ontimeout = function() {
+            fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+        };
+
+        xhr.onerror = function() {
+            fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
+        };
+
+        xhr.onabort = function () {
+            fail(FileTransferError.ABORT_ERR, this.status, this.response);
+        };
+
+        xhr.upload.onprogress = function (e) {
+            if (that.onprogress) {
+                that.onprogress(e);
+            }
+        };
+
+        xhr.send(fd);
+        // Special case when transfer already aborted, but XHR isn't sent.
+        // In this case XHR won't fire an abort event, so we need to check if transfers record
+        // isn't deleted by filetransfer.abort and if so, call XHR's abort method again
+        if (!transfers[that._id]) {
+            xhr.abort();
+        }
+    };
+
+
+    var dataPrefix = 'data:';
+    if (filePath.indexOf(dataPrefix) === 0 && filePath.indexOf('base64') !== -1) {
+      var splitted = filePath.split(',');
+      var prefix = splitted[0];
+      var base64 = splitted[1];
+      if (!mimeType) {
+        mimeType = prefix.substring(prefix.substring(dataPrefix.length, prefix.indexOf(';')));
+      }
+      var content = base64ToArrayBuffer(base64);
+      uploadContent(content);
+      return;
+    }
+
     window.resolveLocalFileSystemURL(filePath, function(entry) {
         entry.file(function(file) {
             var reader = new FileReader();
             reader.onloadend = function() {
-                var blob = new Blob([this.result], {type: mimeType});
-
-                // Prepare form data to send to server
-                var fd = new FormData();
-                fd.append(fileKey, blob, fileName);
-                for (var prop in params) {
-                    if (params.hasOwnProperty(prop)) {
-                        fd.append(prop, params[prop]);
-                    }
-                }
-
-                xhr.open(httpMethod, server);
-
-                // Fill XHR headers
-                for (var header in headers) {
-                    if (headers.hasOwnProperty(header)) {
-                        xhr.setRequestHeader(header, headers[header]);
-                    }
-                }
-
-                xhr.onload = function() {
-                    if (this.status === 200) {
-                        var result = new FileUploadResult(); // jshint ignore:line
-                        result.bytesSent = blob.size;
-                        result.responseCode = this.status;
-                        result.response = this.response;
-                        delete transfers[that._id];
-                        successCallback(result);
-                    } else if (this.status === 404) {
-                        fail(FileTransferError.INVALID_URL_ERR, this.status, this.response);
-                    } else {
-                        fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
-                    }
-                };
-
-                xhr.ontimeout = function() {
-                    fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
-                };
-
-                xhr.onerror = function() {
-                    fail(FileTransferError.CONNECTION_ERR, this.status, this.response);
-                };
-
-                xhr.onabort = function () {
-                    fail(FileTransferError.ABORT_ERR, this.status, this.response);
-                };
-
-                xhr.upload.onprogress = function (e) {
-                    if (that.onprogress) {
-                        that.onprogress(e);
-                    }
-                };
-
-                xhr.send(fd);
-                // Special case when transfer already aborted, but XHR isn't sent.
-                // In this case XHR won't fire an abort event, so we need to check if transfers record
-                // isn't deleted by filetransfer.abort and if so, call XHR's abort method again
-                if (!transfers[that._id]) {
-                    xhr.abort();
-                }
+              uploadContent(this.result);
             };
             reader.readAsArrayBuffer(file);
         }, function() {
@@ -232,7 +260,7 @@ FileTransfer.prototype.download = function(source, target, successCallback, erro
     }
 
     options = options || {};
-    
+
     var headers = options.headers || {};
     var withCredentials = options.withCredentials || false;
 
